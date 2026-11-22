@@ -1,216 +1,291 @@
-/* Personal EPUB Library v1.0
-   EPUB parsing happens locally in the browser. No EPUB file is uploaded to the host. */
-const DB_NAME = "personal-epub-library";
-const DB_VERSION = 1;
-let db, books = [], activeBook = null, activeChapter = 0, activeMode = "original", rendition = null, epubBook = null, fontSize = 18;
-const $ = id => document.getElementById(id);
+/**
+ * Main Application Entry Point
+ * Mengelola Dashboard Perpustakaan, Import EPUB, Pencarian, Detail Modal, Split EPUB, dan Backup/Restore.
+ */
 
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => request.result.createObjectStore("books", { keyPath: "id" });
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-function dbGetAll() { return new Promise((res, rej) => { const r=db.transaction("books").objectStore("books").getAll(); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
-function dbPut(value) { return new Promise((res, rej) => { const r=db.transaction("books","readwrite").objectStore("books").put(value); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error); }); }
-function dbDelete(id) { return new Promise((res, rej) => { const r=db.transaction("books","readwrite").objectStore("books").delete(id); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error); }); }
-function showToast(message) { const t=$("toast"); t.textContent=message; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2600); }
-function busy(show, text="Memproses EPUB...") { $("busyText").textContent=text; $("busy").classList.toggle("hidden",!show); }
-function escapeHTML(s="") { return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-function textOf(el) { return (el?.textContent || "").trim(); }
-function cleanPath(path) { const stack=[]; for(const p of path.replace(/\\/g,"/").split("/")){if(!p||p===".")continue;if(p==="..")stack.pop();else stack.push(p);} return stack.join("/"); }
-function resolvePath(base, href) { if(!href)return base; if(/^(https?:|data:|blob:|#)/i.test(href))return href; return cleanPath(base.slice(0,base.lastIndexOf("/")+1)+href.split("#")[0].split("?")[0]); }
-function xmlDoc(s) { return new DOMParser().parseFromString(s,"application/xml"); }
-function firstText(doc, selectors) { for(const s of selectors){const n=doc.querySelector(s);if(n&&textOf(n))return textOf(n);} return ""; }
+import { db } from './database.js';
+import { EpubProcessor } from './epub-parser.js';
+import { EpubReaderController } from './reader.js';
+import { showToast, escapeHtml } from './utils.js';
 
-async function parseEpub(file) {
-  if(!window.JSZip) throw new Error("Pustaka ZIP belum termuat. Periksa koneksi internet lalu muat ulang.");
-  const zip = await JSZip.loadAsync(file);
-  const containerFile = zip.file("META-INF/container.xml");
-  if(!containerFile) throw new Error("File ini tidak memiliki META-INF/container.xml. EPUB mungkin tidak valid.");
-  const container = xmlDoc(await containerFile.async("text"));
-  const rootfile = container.querySelector("rootfile");
-  const opfPath = rootfile?.getAttribute("full-path");
-  if(!opfPath || !zip.file(opfPath)) throw new Error("File OPF tidak ditemukan.");
-  const opf = xmlDoc(await zip.file(opfPath).async("text"));
-  const opfDir = opfPath.includes("/") ? opfPath.slice(0,opfPath.lastIndexOf("/")+1) : "";
-  const meta = opf.querySelector("metadata");
-  const title = firstText(meta,["title","dc\\:title"]) || file.name.replace(/\.epub$/i,"");
-  const author = firstText(meta,["creator","dc\\:creator"]) || "Penulis tidak diketahui";
-  const description = firstText(meta,["description","dc\\:description"]) || "Tidak ada deskripsi di metadata EPUB.";
-  const language = firstText(meta,["language","dc\\:language"]) || "Tidak diketahui";
-  const publisher = firstText(meta,["publisher","dc\\:publisher"]);
-  const subjects = [...(meta?.querySelectorAll("subject, dc\\:subject")||[])].map(textOf).filter(Boolean);
-  const manifest = new Map();
-  opf.querySelectorAll("manifest item").forEach(item => {
-    manifest.set(item.getAttribute("id"), {href:item.getAttribute("href"), type:item.getAttribute("media-type"), props:item.getAttribute("properties")||""});
-  });
-  let coverHref = "";
-  const coverMeta = [...(meta?.querySelectorAll("meta")||[])].find(m=>m.getAttribute("name")==="cover");
-  if(coverMeta) coverHref = manifest.get(coverMeta.getAttribute("content"))?.href || "";
-  if(!coverHref) {
-    const coverItem = [...manifest.values()].find(m=>m.props.split(/\s+/).includes("cover-image"));
-    coverHref = coverItem?.href || "";
-  }
-  let coverData = "";
-  if(coverHref) {
-    const coverPath=resolvePath(opfDir,coverHref), coverFile=zip.file(coverPath);
-    if(coverFile) coverData=await coverFile.async("base64").then(b=>`data:${manifest.get([...manifest].find(([,v])=>resolvePath(opfDir,v.href)===coverPath)?.[0])?.type||"image/jpeg"};base64,${b}`).catch(()=> "");
-  }
-  // EPUB 3 navigation document
-  let navItem = [...manifest.values()].find(m=>m.props.split(/\s+/).includes("nav"));
-  let toc = [];
-  if(navItem) {
-    const navPath=resolvePath(opfDir,navItem.href), navFile=zip.file(navPath);
-    if(navFile) {
-      const nav=xmlDoc(await navFile.async("text"));
-      const navEl=[...nav.querySelectorAll("nav")].find(n=>(n.getAttribute("epub:type")||n.getAttribute("type")||"").includes("toc")) || nav.querySelector("nav");
-      if(navEl) toc=[...navEl.querySelectorAll("a[href]")].map(a=>({label:textOf(a),href:resolvePath(navPath,a.getAttribute("href"))})).filter(x=>x.label);
+class PersonalLibraryApp {
+    constructor() {
+        this.books = [];
+        this.selectedBook = null;
+        this.reader = new EpubReaderController({
+            onExit: () => this.refreshLibrary()
+        });
+
+        this.init();
     }
-  }
-  // EPUB 2 NCX fallback
-  if(!toc.length) {
-    const ncxItem=[...manifest.values()].find(m=>m.type==="application/x-dtbncx+xml");
-    if(ncxItem) {
-      const ncxPath=resolvePath(opfDir,ncxItem.href), ncx=xmlDoc(await zip.file(ncxPath).async("text"));
-      toc=[...ncx.querySelectorAll("navPoint")].map(n=>({label:textOf(n.querySelector("navLabel text")),href:resolvePath(ncxPath,n.querySelector("content")?.getAttribute("src")||"")})).filter(x=>x.label&&x.href);
+
+    async init() {
+        this.bindDashboardEvents();
+        await this.refreshLibrary();
     }
-  }
-  // Spine fallback if no TOC
-  const spineIds=[...opf.querySelectorAll("spine itemref")].map(x=>x.getAttribute("idref"));
-  let chapterItems=toc.map(t=>({title:t.label,path:t.href.split("#")[0],fragment:t.href.includes("#")?t.href.split("#")[1]:""}));
-  if(!chapterItems.length) chapterItems=spineIds.map(id=>{const m=manifest.get(id);return m?{title:m.href.split("/").pop().replace(/\.(xhtml|html|htm)$/i,""),path:resolvePath(opfDir,m.href),fragment:""}:null;}).filter(Boolean);
-  const seen=new Set();
-  chapterItems=chapterItems.filter(c=>{if(seen.has(c.path+"#"+c.fragment))return false;seen.add(c.path+"#"+c.fragment);return true;});
-  if(!chapterItems.length) throw new Error("Tidak menemukan dokumen chapter di EPUB ini.");
-  const chapters=[];
-  for(let i=0;i<chapterItems.length;i++){
-    const item=chapterItems[i], entry=zip.file(item.path);
-    if(!entry) continue;
-    const source=await entry.async("text");
-    const doc=new DOMParser().parseFromString(source,"text/html");
-    const body=doc.body || doc.documentElement;
-    const content=body.innerHTML || "";
-    const plain=(body.textContent||"").replace(/\s+/g," ").trim();
-    chapters.push({title:item.title||`Chapter ${i+1}`,path:item.path,fragment:item.fragment,content,plain});
-  }
-  if(!chapters.length) throw new Error("Dokumen chapter tidak dapat dibaca.");
-  return {id:crypto.randomUUID(),fileName:file.name,title,author,description,language,publisher,subjects,coverData,chapters,createdAt:Date.now(),epubBlob:file};
+
+    bindDashboardEvents() {
+        const fileInput = document.getElementById('epub-file-input');
+        document.getElementById('btn-upload-trigger').addEventListener('click', () => fileInput.click());
+        document.getElementById('btn-empty-upload').addEventListener('click', () => fileInput.click());
+
+        fileInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files || []);
+            if (files.length > 0) {
+                await this.handleImportFiles(files);
+                fileInput.value = '';
+            }
+        });
+
+        // Pencarian Judul & Penulis
+        document.getElementById('library-search').addEventListener('input', (e) => {
+            this.renderBookGrid(e.target.value);
+        });
+
+        // Backup & Restore JSON
+        document.getElementById('btn-backup').addEventListener('click', () => this.handleBackup());
+        const restoreInput = document.getElementById('restore-input');
+        document.getElementById('btn-restore').addEventListener('click', () => restoreInput.click());
+        restoreInput.addEventListener('change', async (e) => {
+            if (e.target.files?.[0]) {
+                await this.handleRestore(e.target.files[0]);
+                restoreInput.value = '';
+            }
+        });
+
+        // Modal Controls
+        document.getElementById('btn-close-modal').addEventListener('click', () => this.closeModal());
+        document.querySelector('#book-detail-modal .modal-backdrop').addEventListener('click', () => this.closeModal());
+
+        document.getElementById('btn-modal-read').addEventListener('click', () => {
+            if (!this.selectedBook) return;
+            const id = this.selectedBook.id;
+            this.closeModal();
+            this.reader.openBook(id);
+        });
+
+        document.getElementById('btn-modal-delete').addEventListener('click', async () => {
+            if (!this.selectedBook) return;
+            await this.confirmAndDeleteBook(this.selectedBook);
+            this.closeModal();
+        });
+
+        document.getElementById('btn-modal-export-range').addEventListener('click', () => {
+            document.getElementById('split-panel').classList.toggle('hidden');
+        });
+
+        document.getElementById('btn-execute-split').addEventListener('click', () => this.handleSplitEpub());
+    }
+
+    async refreshLibrary() {
+        this.books = await db.getAllBooks();
+        document.getElementById('book-count-badge').textContent = `${this.books.length} Novel Tersimpan`;
+        const currentQuery = document.getElementById('library-search').value;
+        this.renderBookGrid(currentQuery);
+    }
+
+    renderBookGrid(searchQuery = '') {
+        const grid = document.getElementById('book-grid');
+        const emptyState = document.getElementById('empty-state');
+        const q = searchQuery.trim().toLowerCase();
+
+        const filtered = q
+            ? this.books.filter(b =>
+                b.title.toLowerCase().includes(q) ||
+                b.author.toLowerCase().includes(q)
+            )
+            : this.books;
+
+        if (this.books.length === 0) {
+            grid.innerHTML = '';
+            emptyState.classList.remove('hidden');
+            return;
+        }
+
+        emptyState.classList.add('hidden');
+        grid.innerHTML = '';
+
+        const fragment = document.createDocumentFragment();
+        for (const book of filtered) {
+            const currentCh = (book.progress?.chapterIndex || 0) + 1;
+            const totalCh = book.totalChapters || 1;
+            const pct = Math.min(100, Math.round((currentCh / totalCh) * 100));
+
+            const card = document.createElement('div');
+            card.className = 'book-item';
+            card.innerHTML = `
+                <div class="book-cover-wrapper">
+                    <img src="${book.coverDataUrl}" alt="${escapeHtml(book.title)}" loading="lazy">
+                    <div class="book-actions-overlay">
+                        <button class="mini-action-btn info-btn" title="Detail & Split EPUB">ⓘ</button>
+                        <button class="mini-action-btn delete del-btn" title="Hapus Novel">✕</button>
+                    </div>
+                    <div class="book-progress-bar"><span style="width: ${pct}%"></span></div>
+                </div>
+                <div class="book-title">${escapeHtml(book.title)}</div>
+                <div class="book-author">${escapeHtml(book.author)}</div>
+                <div class="book-meta-line">Ch ${currentCh} / ${totalCh} (${pct}%)</div>
+            `;
+
+            // Klik langsung pada cover/judul membuka Reader
+            card.addEventListener('click', (e) => {
+                if (e.target.closest('.info-btn')) {
+                    this.openBookModal(book);
+                } else if (e.target.closest('.del-btn')) {
+                    this.confirmAndDeleteBook(book);
+                } else {
+                    this.reader.openBook(book.id);
+                }
+            });
+
+            fragment.appendChild(card);
+        }
+
+        grid.appendChild(fragment);
+    }
+
+    async handleImportFiles(files) {
+        const progressBox = document.getElementById('import-progress-box');
+        const statusText = document.getElementById('import-status-text');
+        const subStatus = document.getElementById('import-substatus');
+        const percentEl = document.getElementById('import-percent');
+        const barEl = document.getElementById('import-progress-bar');
+
+        progressBox.classList.remove('hidden');
+
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            statusText.textContent = `Mengimpor (${i + 1}/${files.length}): ${file.name}`;
+
+            try {
+                const bookRecord = await EpubProcessor.parseEpubForImport(file, (pct, msg) => {
+                    percentEl.textContent = `${pct}%`;
+                    barEl.style.width = `${pct}%`;
+                    subStatus.textContent = msg;
+                });
+
+                subStatus.textContent = 'Menyimpan ke IndexedDB browser...';
+                await db.saveBook(bookRecord, file);
+                showToast(`Berhasil menambahkan "${bookRecord.title}" (${bookRecord.totalChapters} chapter)`);
+            } catch (err) {
+                console.error('Error import EPUB:', err);
+                showToast(`Gagal mengimpor ${file.name}: ${err.message}`, 5000);
+            }
+        }
+
+        setTimeout(() => {
+            progressBox.classList.add('hidden');
+            barEl.style.width = '0%';
+        }, 600);
+
+        await this.refreshLibrary();
+    }
+
+    openBookModal(book) {
+        this.selectedBook = book;
+        document.getElementById('modal-cover').src = book.coverDataUrl;
+        document.getElementById('modal-lang').textContent = (book.language || 'ID').toUpperCase();
+        document.getElementById('modal-title').textContent = book.title;
+        document.getElementById('modal-author').textContent = book.author;
+        document.getElementById('modal-chapters').textContent = `${book.totalChapters} Chapter`;
+        document.getElementById('modal-publisher').textContent = book.publisher;
+        document.getElementById('modal-format').textContent = book.formatSource;
+        document.getElementById('modal-desc').textContent = book.description;
+
+        const genreBox = document.getElementById('modal-genres');
+        genreBox.innerHTML = (book.genres || [])
+            .map(g => `<span class="genre-pill">${escapeHtml(g)}</span>`)
+            .join('');
+
+        // Konfigurasi batas split chapter
+        const startInput = document.getElementById('split-start');
+        const endInput = document.getElementById('split-end');
+        startInput.value = 1;
+        startInput.max = book.totalChapters;
+        endInput.value = Math.min(500, book.totalChapters);
+        endInput.max = book.totalChapters;
+        document.getElementById('split-panel').classList.add('hidden');
+        document.getElementById('split-status').textContent = '';
+
+        document.getElementById('book-detail-modal').classList.remove('hidden');
+    }
+
+    closeModal() {
+        document.getElementById('book-detail-modal').classList.add('hidden');
+        this.selectedBook = null;
+    }
+
+    async confirmAndDeleteBook(book) {
+        const ok = confirm(`Hapus permanen "${book.title}" dari penyimpanan browser ini?`);
+        if (!ok) return;
+        await db.deleteBook(book.id);
+        showToast(`"${book.title}" telah dihapus.`);
+        await this.refreshLibrary();
+    }
+
+    async handleSplitEpub() {
+        if (!this.selectedBook) return;
+        const start = parseInt(document.getElementById('split-start').value, 10) - 1;
+        const end = parseInt(document.getElementById('split-end').value, 10) - 1;
+        const statusEl = document.getElementById('split-status');
+
+        if (isNaN(start) || isNaN(end) || start < 0 || end >= this.selectedBook.totalChapters || start > end) {
+            statusEl.textContent = 'Rentang nomor chapter tidak valid.';
+            return;
+        }
+
+        const blob = await db.getBookFileBlob(this.selectedBook.id);
+        if (!blob) {
+            statusEl.textContent = 'File EPUB asli tidak tersedia.';
+            return;
+        }
+
+        statusEl.textContent = 'Mengemas ulang chapter menjadi EPUB...';
+        try {
+            const { blob: outBlob, filename } = await EpubProcessor.splitEpubRange(
+                blob,
+                this.selectedBook,
+                start,
+                end,
+                (pct) => { statusEl.textContent = `Memproses EPUB pecahan: ${pct}%`; }
+            );
+
+            const url = URL.createObjectURL(outBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 5000);
+            statusEl.textContent = `Berhasil diunduh: ${filename}`;
+        } catch (err) {
+            statusEl.textContent = `Gagal memecah EPUB: ${err.message}`;
+        }
+    }
+
+    async handleBackup() {
+        const jsonStr = await db.exportBackupJson();
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `personal-epub-library-backup-${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+        showToast('Backup metadata & progress berhasil diunduh.');
+    }
+
+    async handleRestore(file) {
+        try {
+            const text = await file.text();
+            const count = await db.importBackupJson(text);
+            showToast(`Berhasil memulihkan ${count} data novel. (Upload ulang file .epub jika ingin membaca isinya).`, 5000);
+            await this.refreshLibrary();
+        } catch (err) {
+            showToast(`Gagal restore: ${err.message}`, 4000);
+        }
+    }
 }
 
-function renderLibrary() {
-  const q=$("searchInput").value.trim().toLowerCase();
-  const filtered=books.filter(b=>(b.title+" "+b.author).toLowerCase().includes(q));
-  $("bookCount").textContent=`${books.length} novel`;
-  $("emptyState").classList.toggle("hidden",books.length>0);
-  $("bookGrid").innerHTML="";
-  filtered.forEach(book=>{
-    const card=document.createElement("article"); card.className="book-card";
-    const cover=document.createElement("div");cover.className="cover";
-    if(book.coverData){const img=document.createElement("img");img.src=book.coverData;img.alt="Cover "+book.title;cover.append(img);}
-    else {const f=document.createElement("div");f.className="cover-fallback";f.textContent=book.title;cover.append(f);}
-    const h=document.createElement("h3");h.textContent=book.title;
-    const p=document.createElement("p");p.textContent=book.author;
-    card.append(cover,h,p);card.addEventListener("click",()=>openDetail(book.id));$("bookGrid").append(card);
-  });
-  if(books.length && !filtered.length) $("bookGrid").innerHTML='<p class="muted">Tidak ada novel yang cocok.</p>';
-}
-async function importFiles(files) {
-  if(!files.length)return;
-  for(const file of files) {
-    if(!file.name.toLowerCase().endsWith(".epub")){showToast(`${file.name}: bukan file EPUB.`);continue;}
-    try {
-      busy(true,`Membaca ${file.name}...`);
-      const book=await parseEpub(file);
-      await dbPut(book); books.unshift(book);
-      showToast(`Berhasil menambahkan: ${book.title}`);
-    } catch(e) { console.error(e); showToast(`${file.name}: ${e.message||"Gagal diproses."}`); }
-    finally { busy(false); }
-  }
-  renderLibrary();
-}
-function showView(name) { ["libraryView","detailView","readerView"].forEach(id=>$(id).classList.toggle("hidden",id!==name)); window.scrollTo(0,0); }
-function openDetail(id) {
-  activeBook=books.find(b=>b.id===id); if(!activeBook)return;
-  $("detailTitle").textContent=activeBook.title;$("detailAuthor").textContent=activeBook.author;
-  $("detailDescription").textContent=activeBook.description;
-  $("detailCover").innerHTML="";
-  if(activeBook.coverData){const img=document.createElement("img");img.src=activeBook.coverData;img.alt="Cover "+activeBook.title;$("detailCover").append(img);}
-  else $("detailCover").textContent=activeBook.title;
-  $("detailTags").innerHTML="";
-  [activeBook.language,activeBook.publisher,...(activeBook.subjects||[])].filter(Boolean).slice(0,8).forEach(t=>{const s=document.createElement("span");s.className="tag";s.textContent=t;$("detailTags").append(s);});
-  $("chapterCount").textContent=`${activeBook.chapters.length} chapter`;
-  $("chapterList").innerHTML="";
-  activeBook.chapters.forEach((c,i)=>{const row=document.createElement("div");row.className="chapter-item";const n=document.createElement("span");n.className="chapter-num";n.textContent=String(i+1).padStart(3,"0");const t=document.createElement("span");t.className="chapter-name";t.textContent=c.title;row.append(n,t);row.addEventListener("click",()=>openReader(i));$("chapterList").append(row);});
-  showView("detailView");
-}
-function openReader(index=0) {
-  if(!activeBook)return;
-  activeChapter=Math.max(0,Math.min(index,activeBook.chapters.length-1));
-  $("readerBookTitle").textContent=activeBook.title;
-  $("readerChapterCount").textContent=activeBook.chapters.length;
-  $("readerChapterList").innerHTML="";
-  activeBook.chapters.forEach((c,i)=>{const b=document.createElement("button");b.className="reader-chapter"+(i===activeChapter?" active":"");b.textContent=`${i+1}. ${c.title}`;b.addEventListener("click",()=>loadChapter(i));$("readerChapterList").append(b);});
-  showView("readerView");loadChapter(activeChapter);
-}
-function safeChapterHTML(raw) {
-  const doc=new DOMParser().parseFromString(raw,"text/html");
-  doc.querySelectorAll("script,iframe,object,embed,form,link,meta,base").forEach(n=>n.remove());
-  doc.querySelectorAll("*").forEach(el=>[...el.attributes].forEach(a=>{if(/^on/i.test(a.name)||((a.name==="href"||a.name==="src")&&/^\s*javascript:/i.test(a.value)))el.removeAttribute(a.name);}));
-  return doc.body.innerHTML;
-}
-function loadChapter(index) {
-  if(!activeBook)return;
-  activeChapter=Math.max(0,Math.min(index,activeBook.chapters.length-1));
-  const chapter=activeBook.chapters[activeChapter];
-  $("readerChapterList").querySelectorAll(".reader-chapter").forEach((b,i)=>b.classList.toggle("active",i===activeChapter));
-  $("readerContent").innerHTML="";
-  if(activeMode==="text") {
-    const wrap=document.createElement("div");wrap.className="text-chapter";
-    const title=document.createElement("h2");title.textContent=chapter.title;wrap.append(title);
-    const body=document.createElement("div");body.innerHTML=safeChapterHTML(chapter.content);wrap.append(body);
-    $("readerContent").append(wrap);
-  } else {
-    // Render chapter XHTML inside a sandboxed frame to preserve the EPUB document's own layout.
-    const frame=document.createElement("iframe");frame.setAttribute("sandbox","");frame.title=chapter.title;
-    const safe=safeChapterHTML(chapter.content);
-    frame.srcdoc=`<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:Georgia,serif;line-height:1.85;color:#292929;background:#fff;max-width:760px;margin:0 auto;padding:34px 24px;font-size:${fontSize}px}img{max-width:100%;height:auto}p{margin:0 0 1.2em}h1,h2,h3{text-align:center;line-height:1.4}a{color:#555}</style></head><body>${safe}</body></html>`;
-    $("readerContent").append(frame);
-  }
-  $("prevChapter").disabled=activeChapter===0;$("nextChapter").disabled=activeChapter===activeBook.chapters.length-1;
-  $("readerContent").scrollTop=0;
-}
-function setMode(mode) { activeMode=mode;document.querySelectorAll(".mode-button").forEach(b=>b.classList.toggle("active",b.dataset.mode===mode));loadChapter(activeChapter); }
-function exportTxt() {
-  if(!activeBook)return;
-  const content=activeBook.chapters.map((c,i)=>`${c.title}\n\n${c.plain}\n\n${"=".repeat(35)}\n`).join("\n");
-  const blob=new Blob([`\uFEFF${activeBook.title}\n${activeBook.author}\n\n${content}`],{type:"text/plain;charset=utf-8"});
-  const url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=(activeBook.title||"novel").replace(/[\\/:*?"<>|]/g,"_")+".txt";a.click();URL.revokeObjectURL(url);
-}
-async function deleteActive() {
-  if(!activeBook||!confirm(`Hapus "${activeBook.title}" dari perpustakaan browser ini?`))return;
-  await dbDelete(activeBook.id);books=books.filter(b=>b.id!==activeBook.id);activeBook=null;renderLibrary();showView("libraryView");showToast("Novel dihapus dari rak.");
-}
-
-$("fileInput").addEventListener("change",e=>{importFiles([...e.target.files]);e.target.value="";});
-$("emptyFileInput").addEventListener("change",e=>{importFiles([...e.target.files]);e.target.value="";});
-$("addTopBtn").addEventListener("click",()=>$("fileInput").click());
-$("searchInput").addEventListener("input",renderLibrary);
-$("homeLink").addEventListener("click",e=>{e.preventDefault();showView("libraryView");});
-$("backBtn").addEventListener("click",()=>showView("libraryView"));
-$("readerBackBtn").addEventListener("click",()=>showView("detailView"));
-$("readFirstBtn").addEventListener("click",()=>openReader(0));
-$("exportBtn").addEventListener("click",exportTxt);
-$("deleteBtn").addEventListener("click",deleteActive);
-$("prevChapter").addEventListener("click",()=>loadChapter(activeChapter-1));
-$("nextChapter").addEventListener("click",()=>loadChapter(activeChapter+1));
-document.querySelectorAll(".mode-button").forEach(b=>b.addEventListener("click",()=>setMode(b.dataset.mode)));
-$("fontUp").addEventListener("click",()=>{fontSize=Math.min(26,fontSize+1);loadChapter(activeChapter);});
-$("fontDown").addEventListener("click",()=>{fontSize=Math.max(13,fontSize-1);loadChapter(activeChapter);});
-
-(async function init(){
-  try { db=await openDB();books=await dbGetAll();books.sort((a,b)=>b.createdAt-a.createdAt);renderLibrary(); }
-  catch(e){console.error(e);showToast("Browser tidak mengizinkan IndexedDB. Coba browser lain atau mode normal.");}
-})();
+window.addEventListener('DOMContentLoaded', () => {
+    new PersonalLibraryApp();
+});
