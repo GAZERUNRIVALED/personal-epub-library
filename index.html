@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101114">
+  <title>Personal EPUB Library</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Literata:opsz,wght@7..72,400;7..72,500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" id="homeLink"><span class="brand-mark">P</span><span>Personal <b>EPUB Library</b></span></a>
+    <div class="top-actions">
+      <span class="local-indicator"><i></i> Local library</span>
+      <button class="icon-button" id="addTopBtn" title="Tambah EPUB" aria-label="Tambah EPUB">＋</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="libraryView" class="view">
+      <div class="hero">
+        <div>
+          <p class="eyebrow">YOUR PRIVATE READING SPACE</p>
+          <h1>Rak bacaan<span class="muted-dot">.</span></h1>
+          <p class="subheading">Simpan, pecah, dan baca koleksi EPUB-mu dalam satu tempat.</p>
+        </div>
+        <label class="upload-button">
+          <input id="fileInput" type="file" accept=".epub,application/epub+zip" multiple>
+          <span>＋ Tambah EPUB</span>
+        </label>
+      </div>
+
+      <div class="toolbar">
+        <div class="search-wrap"><span>⌕</span><input id="searchInput" type="search" placeholder="Cari judul atau penulis..."></div>
+        <div class="book-count" id="bookCount">0 novel</div>
+      </div>
+
+      <div id="emptyState" class="empty-state">
+        <div class="empty-icon">▤</div>
+        <h2>Rak masih kosong</h2>
+        <p>Upload file EPUB pertamamu. Metadata, cover, dan daftar chapter akan dibaca otomatis.</p>
+        <label class="upload-button secondary">
+          <input id="emptyFileInput" type="file" accept=".epub,application/epub+zip" multiple>
+          <span>Pilih file EPUB</span>
+        </label>
+      </div>
+      <div id="bookGrid" class="book-grid"></div>
+      <p class="storage-note">File disimpan di IndexedDB browser ini. File tidak diunggah ke GitHub atau Cloudflare.</p>
+    </section>
+
+    <section id="detailView" class="view hidden">
+      <button class="back-button" id="backBtn">← Kembali ke rak</button>
+      <div class="detail-layout">
+        <aside class="book-side">
+          <div id="detailCover" class="detail-cover"></div>
+          <div class="detail-actions">
+            <button class="primary-button" id="readFirstBtn">Mulai membaca</button>
+            <button class="quiet-button" id="exportBtn">Ekspor chapter TXT</button>
+            <button class="danger-button" id="deleteBtn">Hapus dari rak</button>
+          </div>
+        </aside>
+        <div class="detail-main">
+          <p class="eyebrow">BOOK DETAILS</p>
+          <h1 id="detailTitle">Judul novel</h1>
+          <p class="author-line" id="detailAuthor"></p>
+          <div id="detailTags" class="tag-row"></div>
+          <p id="detailDescription" class="description"></p>
+          <div class="section-heading"><h2>Daftar chapter</h2><span id="chapterCount" class="muted"></span></div>
+          <div id="chapterList" class="chapter-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="readerView" class="view hidden">
+      <div class="reader-top">
+        <button class="back-button" id="readerBackBtn">← Detail novel</button>
+        <div class="reader-book-title" id="readerBookTitle"></div>
+        <div class="reader-tools">
+          <button class="icon-button" id="fontDown" title="Perkecil teks">A−</button>
+          <button class="icon-button" id="fontUp" title="Perbesar teks">A＋</button>
+        </div>
+      </div>
+      <div class="reader-layout">
+        <aside class="reader-sidebar">
+          <div class="sidebar-heading">CHAPTERS <span id="readerChapterCount"></span></div>
+          <div id="readerChapterList" class="reader-chapter-list"></div>
+        </aside>
+        <article class="reader-main">
+          <div class="reader-toolbar">
+            <div class="mode-switch" role="group" aria-label="Mode pembaca">
+              <button class="mode-button active" data-mode="original">EPUB asli</button>
+              <button class="mode-button" data-mode="text">Teks</button>
+            </div>
+            <div class="chapter-nav">
+              <button class="icon-button" id="prevChapter" title="Chapter sebelumnya">←</button>
+              <button class="icon-button" id="nextChapter" title="Chapter berikutnya">→</button>
+            </div>
+          </div>
+          <div id="readerContent" class="reader-content">
+            <div class="reader-placeholder">Pilih chapter untuk mulai membaca.</div>
+          </div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <div id="busy" class="busy hidden"><div class="spinner"></div><span id="busyText">Memproses EPUB...</span></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
