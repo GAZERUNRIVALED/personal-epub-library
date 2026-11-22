@@ -1,0 +1,19 @@
+name = "personal-epub-library"
+main = "worker/index.js"
+compatibility_date = "2025-01-01"
+
+# Frontend statis (folder public/) disajikan oleh Worker yang sama -> satu deploy, satu origin, tanpa CORS.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "epub-library"
+
+# Agar source.lua bisa di-import sebagai teks
+[[rules]]
+type = "Text"
+globs = ["**/*.lua"]
+fallthrough = true

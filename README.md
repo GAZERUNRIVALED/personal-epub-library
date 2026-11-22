@@ -1,24 +1,40 @@
-# Personal EPUB Library
-Perpustakaan EPUB pribadi, statis, tanpa backend. Semua data disimpan di IndexedDB browser; tidak ada yang dikirim ke server.
+# Personal EPUB Library V3.0
+Perpustakaan EPUB pribadi + penyedia source untuk MiruTime. Satu Cloudflare Worker menyajikan frontend (`public/`), API, dan file source Lua; konten terpublikasi disimpan di R2.
 
 ## Struktur
-index.html · styles/main.css · scripts/{database,epub-parser,asset-resolver,library,reader,app}.js
+- `public/` frontend (HTML/CSS/vanilla JS, IndexedDB, JSZip). EPUB asli, cover, progress, dan pengaturan reader **tetap lokal**.
+- `worker/index.js` API + halaman HTML untuk source; `worker/source.lua` template source (baseUrl diisi otomatis saat diunduh).
+- `wrangler.toml`: assets, binding R2 `BUCKET`, aturan import `.lua`.
 
-## Alur
-1. Import: JSZip → container.xml → OPF → metadata, cover, manifest, spine, nav/NCX → filter halaman non-chapter → simpan (books / files / chapters) di IndexedDB.
-2. Buka: ZIP dimuat ulang dari Blob; chapter diproses hanya saat dibuka (DOMParser `text/html`, jadi HTML Legado dan XHTML sama-sama terbaca).
-3. Asset: path relatif dihitung dari lokasi chapter/CSS (`../` didukung), lalu diganti Blob URL (img src/srcset, SVG image, CSS url(), @import, font). Script/handler dibuang; iframe `sandbox` tanpa JS + CSP.
-4. Daftar chapter: virtual list (hanya ±20 baris DOM), pencarian pada array judul.
+## Deploy (sekali saja)
+```
+npm install
+npx wrangler login
+npx wrangler r2 bucket create epub-library
+npx wrangler secret put ADMIN_KEY      # isi string acak panjang
+npx wrangler deploy
+```
+Tidak ada file yang perlu diedit setelah deploy; frontend memakai origin yang sama. Lokal: buat `.dev.vars` berisi `ADMIN_KEY=xxx` lalu `npx wrangler dev`.
 
-## Jalan lokal
-`python3 -m http.server 8080` lalu buka http://localhost:8080 (IndexedDB butuh http/https, bukan file://).
+## Memakai
+1. Buka situs, tekan ⚙, isi Admin API key, "Simpan & tes" (key hanya disimpan di localStorage browser Anda, tidak ada di kode).
+2. Import EPUB → Detail → **Publish to MiruTime** (Update Publication / Unpublish menyusul setelah terbit). ID novel stabil per buku, jadi update tidak membuat duplikat.
+3. Di ⚙ salin URL `…/source.lua` atau unduh filenya, lalu tambahkan ke MiruTime.
 
-## Deploy Cloudflare Pages
-Push folder ini ke GitHub → Cloudflare Dashboard → Workers & Pages → Create → Pages → Connect to Git → Build command kosong, output directory `/`. 
-Akses pribadi: Zero Trust → Access → Applications → Add self-hosted → pilih domain *.pages.dev proyek → policy Allow dengan email Anda (One-time PIN).
+## API
+Publik: `GET /api/novels`, `/api/search?keyword=`, `/api/novel/{id}`, `/api/novel/{id}/chapters`, `/api/novel/{id}/chapter/{n}`.
+Untuk source Lua (HTML, meniru struktur `botaodz2.lua`): `/category/all/[N.html]`, `/s/search?searchkey=`, `/book/{id}/`, `/book/{id}/{n}.html`, `/asset/{id}/{nama}`.
+Admin (Bearer ADMIN_KEY): `PUT/POST/DELETE /api/admin/...`.
 
-## Keterbatasan
-- JSZip dimuat dari cdnjs; untuk offline total, unduh `jszip.min.js` ke `scripts/` dan ubah tag di index.html.
-- Link antar-chapter di dalam teks dinonaktifkan (navigasi lewat tombol/daftar).
-- Belum diuji dengan EPUB sungguhan di browser: lakukan uji manual dengan EPUB biasa, ekspor Legado, dan file ±6.852 chapter. Hanya pemeriksaan sintaks JS yang dijalankan.
-- Pengaturan baca di localStorage (kecil); EPUB di IndexedDB. Tidak ada autentikasi bawaan (gunakan Cloudflare Access).
+## Privasi
+Novel yang dipublikasikan **dapat dibaca siapa pun yang mengetahui URL Worker** (endpoint baca publik agar MiruTime bisa mengakses; tidak ada login di sisi pembaca). Hanya endpoint tulis yang dilindungi. Jangan publikasikan buku yang harus tetap privat. Anda bisa menambah Cloudflare Access di domain, tetapi itu akan memblokir MiruTime juga kecuali dibuat bypass untuk jalur baca.
+
+## Status pengujian (jujur)
+- Dijalankan: pemeriksaan sintaks semua JS; 25 tes Worker dengan R2 tiruan di Node (auth, upload, commit, update tanpa duplikat, unpublish, sanitasi, halaman HTML untuk Lua, limit ukuran).
+- **Belum dijalankan**: seluruh frontend di browser, parsing EPUB nyata (Legado/standar), 6.852 chapter, deploy Cloudflare sungguhan, dan source Lua di aplikasi.
+
+## Kompatibilitas MiruTime — yang perlu Anda ketahui
+`worker/source.lua` hanya memakai fungsi dan library yang terlihat di `botaodz2.lua` (html_select, html_attr, http_get, require_lib "fetch/urls/catalog/content", dst.) dengan pola yang sama. Header file referensi itu menyebut runtime "NoveLA"; saya mengikuti file itu apa adanya. Hal yang tidak bisa saya pastikan: nilai `language = "id"`; `standardTransforms` dengan lang "id" (dibungkus `pcall`, jatuh ke teks biasa jika gagal); gambar di dalam chapter kemungkinan tidak tampil karena source mengembalikan teks; apakah MiruTime menerima URL remote atau hanya file .lua. Uji di aplikasi dan kirim pesan galat jika ada.
+
+## Batas
+Satu chapter maks 1,5 MB; gambar maks 8 MB; unggahan per request maks 3 MB. Link antar-chapter dan data: image dipertahankan seperlunya; ID dan class HTML dibuang saat publikasi.
