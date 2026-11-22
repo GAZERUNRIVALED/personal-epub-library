@@ -1,0 +1,11 @@
+# Abaikan file novel pribadi agar tidak ikut ter-push ke GitHub
+*.epub
+*.zip
+*.bak
+
+# Sistem & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+node_modules/
